@@ -1,0 +1,269 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
+#include <string.h>
+#include "client.c"
+//-----Parametrii-----------
+#define PORT "22121"
+#define COMMAND "12#"
+#define MAXSIZE 2048
+#define wellcomePage "hello.html"
+void iesire(void);
+
+//Server pentru deservirea a mai multor clienti concomitent
+
+int main() {
+	/*
+	 *  Definire si initializare parametri
+	 *  ---------------------------------
+	 */
+//Tipul de date "fd_set" reprezintă seturi de descriptori de fișiere pentru funcția de selectare. Este de fapt o serie de biți.
+//* master - lista de file descriptori de baza
+	fd_set master; 
+//*	read_fds - lista de file descriptori in care vom copia masterul
+	fd_set read_fds;
+//* fdmax - variabila in care vom tine cont de cel mai mare file descriptor
+	int fdmax; 
+//* newfd - file descriptorul returnat de functia accept
+	int newfd;
+//* i - folosit de for pentru a itera prin file descriptorii activi;
+    int	i; 
+//*	listener - file descriptorul pe care serverul va face listen
+	int listener; 
+//*	val_recv - numarul de bytes returnat de functia recv;
+	int val_recv;
+//* client_response - returneaza	
+    int client_response;
+//*	remoteaddr - structura de tip sockaddr_storage care va contine datele clientului conectat;
+	struct sockaddr_storage remoteaddr;
+//*	addrlen - variabila care indica dimensiunea structurii remoteaddr	
+	socklen_t addrlen;
+//* socket_options - valoarea care va fi setata pentru optiunile specificate in setsockopt;
+	int socket_options = 1;
+//* buffer - bufferul in care vom citi datele venite de la client;
+	char buffer[MAXSIZE];
+//* comm_neimpl - mesajul trimis catre client daca comanda nu este implementata;
+	char *comm_neimpl = "Comanda neimplementata\n";
+//*	hints - structura in care vom specifica datele legate de protocol, tip conexiune, etc;	
+//*	ai - pointer catre un linked list de structuri addrinfo;
+//*	p - pointer catre un linked list de structuri addrinfo;
+	struct addrinfo hints, *ai, *p;
+//* date - citim datele din pagina web
+    char date[MAXSIZE]; 
+
+/*Inițializează setul descriptor de fișiere fdset pentru a avea zero biți pentru toți descriptorii de fișiere.*/
+	/* golim seturile master si read_fds */
+	FD_ZERO(&master);
+	FD_ZERO(&read_fds);
+
+	printf("Initializare server...\n");
+ 
+	/*  Setez structura addrinfo cu 5+ necesari 
+	 *	-----------------------------------------------
+	 *	AF_INET - pentru conexiuni IPV4;
+	 *	SOCK_STREAM - pentru comunicare bazata pe conexiune/TCP;
+	 * 	AI_PASSIVE pentru a seta automat adresa ip;
+	 */
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
+	hints.ai_flags = AI_PASSIVE;
+
+	/*  int getaddrinfo(const char *node, const char *service,
+	 *  				const struct addrinfo *hints,
+	 *  				struct addrinfo **res)
+	 *  ------------------------------------------------------
+	 *  node - numele/adresa ip a hostului la care ne conectam;
+	 *  service - numele portului;
+	 *  hints - pointer catre o structura addrinfo deja declarata
+	 *  		cu informatiile relevante;
+	 *  ----
+	 *  Returneaza un pointer (res) catre un linked-list de structuri de tip addrinfo
+	 */
+	if (getaddrinfo(NULL, PORT, &hints, &ai) == -1) {
+		perror("getaddrinfo() :");
+		iesire();
+	} else {
+		printf("Adrese si port configurate cu succes...100%\n");
+	}
+
+
+/* getaddrinfo () returnează o listă de structuri de adrese.
+               Încercam fiecare adresă până când legăm cu succes.
+               Dacă socket()da ( sau bind()) eșuează, noi închidem socket() si
+              încercam următoarea adresă. */
+	for (p = ai; p != NULL; p = p->ai_next) {
+
+		/*
+		 *  int socket(int domain, int type, int protocol)
+		 *  ----------------------------------------------
+		 *  domain - PF_INET sau PF_INET6;
+		 *  type - tipul conexiunii: TCP sau UDP;
+		 *  protocol - 0 pentru a selecta protocolul implicit pentru conexiunea specificata;
+		 *  ----
+		 *  Returneaza un socket file descriptor;
+		 */
+		listener = socket(p->ai_family, p->ai_socktype, p->ai_protocol);
+		if (listener < 0) {
+			continue; /* ies din bucla curenta si merg la urmatoarea iteratie */
+		}
+		
+		//Funcția setsockopt() oferă un program de aplicație cu mijloace pentru a controla comportamentul socketului.
+		/*  int setsockopt(int socket, int level, int option_name, const void *option_value, socklen_t option_len)
+		 *  ------------------------------------------------------------------------------------------------------
+		 *  socket - file descriptorul returnat de functia socket();
+		 *  SOL_SOCKET - specifica ca optiunile vor fi setate la nivel de socket;
+		 *  SO_REUSEADDR - reporneste un proces pe aceeasi adresa;
+		 *  SO_REUSEPORT - reporneste un proces pe acelasi port;
+		 */
+		setsockopt(listener, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &socket_options, sizeof(int));
+
+		/*  int bind(int sockfd, struct sockaddr &my_addr, int addrlen)
+		 *  -----------------------------------------------------------
+		 *  sockfd - socket file descriptorul returnat de functia socket();
+		 *  my_addr - pointer catre o structura sockaddr care contine informatii
+		 *  		  legate de adrese/nume/port;
+		 *  addrlen - lungimea structurii my_addr;
+		 */
+		if (bind(listener, p->ai_addr, p->ai_addrlen) < 0) {
+			close(listener);
+			continue;
+		}
+		break;
+	}
+
+	/* daca intram pe if, nu avem bind pe niciun file descriptor, si iesim din program */
+	if (p == NULL) {
+		perror("bind() :");
+		iesire();
+	}
+
+	/* nu mai avem nevoie de structurile addrinfo, le eliberam din memorie */
+	freeaddrinfo(ai);
+
+	/*  int listen(int sockfd, int backlog)
+	 *  -----------------------------------
+	 *  sockfd - socket file descriptorul returnat de functia socket();
+	 *  backlog - numar de conexiuni in asteptare pe socket;
+	 */
+	if(listen(listener, 2) == -1) {
+		perror("listen() :");
+		iesire();
+	}
+
+	/* Adauga socket file descriptorul listener la setul master */
+	FD_SET(listener, &master);
+
+ 	/* 
+	 * Memorez cel mai mare file descriptor, in cazul nostru singurul file descriptor
+	 * activ este listener;
+	 */
+	fdmax = listener;
+FILE *webPage=NULL;//initializez fisierul
+	webPage = fopen(wellcomePage, "r");
+	if (webPage == NULL) {
+		printf("Nu s-a putut citi fisierul\n");
+		return -1;
+	}
+
+	printf("Astept conexiuni...\n");
+
+	while(1) { /* Bucla infinita in care serverul va accepta conexiuni */
+
+		read_fds = master; /* copiez masterul intro alta structura read_fds */
+
+		/*  int select(int numfds, fd_set *readfds, fd_set *writefds,
+		 *  		   fd_set *exceptfds, struct timeval *timeout)
+		 * 	---------------------------------------------------------
+		 * 	numfds - trebuie setat la valoarea celui mai mare file descriptor + 1;
+		 * 	readfds - fd_set care va fi modificat cu file descriptorii care sunt gata de a fi cititi;
+		 * 	writefds - fd_set care va fi modificat cu file descriptorii care sunt gata de a fi scrisi;
+		 * 	exceptfds - fd_set care va fi modificat cu file descriptorii care au exceptii??;
+		 * 	timeout - specifica perioada de timeout pentru o conexiune;
+		 */
+		if (select(fdmax+1, &read_fds, NULL, NULL, NULL) == -1) {
+			perror("select() :");
+			iesire();
+		}
+
+		/* iteram prin conexiunile existente cautand date de citit */
+		for(i = 0; i <= fdmax; i++) {
+			
+			/* verifica daca socketul e gata de a fi citit */
+			if (FD_ISSET(i, &read_fds)) {
+				if (i == listener) { /* if-ul verifica daca conexiunea existenta, daca nu, va accepta noua conexiune */
+					printf("O noua solicitare de conectare...100%\n");
+
+					addrlen = sizeof(remoteaddr);
+					
+					/*  int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+					 *  ------------------------------------------------------------------ 
+					 *  sockfd - socket file descriptorul pentru care FD_ISSET a returnat true;
+					 *  addr - pointer catre o structura locala sockaddr_storage care contine informatii legate de conexiunea curenta;
+					 *  addrlen - dimensiunea structurii addr;
+					 */
+					newfd = accept(listener, (struct sockaddr *)&remoteaddr, &addrlen);
+					fread(date,1,1024,webPage);
+						
+					if (newfd == -1) {
+						perror("accept() :");
+					} else {
+						printf("Conectare acceptata...100%\n");
+						FD_SET(newfd, &master);
+						if (newfd > fdmax) {
+							fdmax = newfd;
+						}
+						send(fdmax,date, strlen(date),0);
+					}
+					
+				} else { 
+
+					/*  int recv(int sockfd, void *buf, int len, int flags);
+					 *  ----------------------------------------------------
+					 *  sockfd - socket file descriptorul pe care vin datele;
+					 *  buf - buffer-ul in care vom citi informatia;
+					 *  len - dimensiunea maxima a bufferului;
+					 *  flags - flaguri pentru a specifica un anumit comportament al functiei recv();
+					 *  ----
+					 *  Returneaza dimensiunea datelor care au venit in urma apelarii acestei functii;
+					 */
+					if ((val_recv = recv(i, buffer, sizeof(buffer), 0)) <= 0) { /* daca valoarea returnata de recv e <= 0, avem o eroare */
+						if (val_recv == 0) {
+							printf("Conexiunea a fost inchisa\n");
+						} else {
+							perror("recv() :");
+						}
+						close(i);
+						FD_CLR(i, &master); /* scot socket file descriptorul din setul master */
+					} else { 
+						if (strcmp(buffer, COMMAND) == 0) {
+							client_response = make_request(i);
+							if (client_response == 1) {
+								printf("Raspuns client reusit...100% \n");
+								printf(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n\n");
+							} else {
+								printf("Eroare in client.c\n");
+							}
+						} else {
+							send(i, comm_neimpl, strlen(comm_neimpl), 0);
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return 0;
+}
+
+void iesire(void)
+{
+printf("Program Terminat... :(\n");
+exit(EXIT_FAILURE);	
+}
+
